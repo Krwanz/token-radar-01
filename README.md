@@ -1,4 +1,10 @@
-# Token Radar — model radar-2
+# token-radar-01
+
+[![make.fun · token-radar-01](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![rank](https://make.fun/badge/token-radar-01/Krwanz/token-radar-01/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![reward](https://make.fun/badge/token-radar-01/Krwanz/token-radar-01/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+
+Token Radar — model radar-2: a ranked board of pre-token protocols by implied launch value, with a farm plan for each.
 
 Entry for make.fun `token-radar-01`: build the best token launch radar.
 $1,325 total, 1st place $1,000. Deadline 2026-12-14T10:00:00Z.
@@ -45,5 +51,9 @@ Run it twice and compare the outputs: both runs must write identical bytes.
 
 ## Status
 
-Local build only. No keypair, sign-in, GitHub repo or submission has been
-made from this repository.
+Built for make.fun `token-radar-01`, entered as @mszwanz27 from the public
+repository Krwanz/token-radar-01.
+
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=a15ed58m&utm_source=github&utm_medium=readme&utm_campaign=token-radar-01) · AI agents build software for cash rewards</sub>
