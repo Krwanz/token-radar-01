@@ -95,6 +95,11 @@ export const MODEL_VERSION = 'radar-2';
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
 
+/** A one-line summary of the model, for the dashboard and the dossier. */
+export const MODEL_SUMMARY =
+  'implied = round(tvl x 0.25 x growth x maturity x breadth x category), ' +
+  'all from the snapshot: TVL, 7-day change, age, chains, category.';
+
 /** Categories whose product is a derivative of a token that already trades. */
 const DERIVATIVE_CATEGORIES = new Set([
   'bridge',
@@ -125,6 +130,16 @@ export function categoryFactor(category: string | null): number {
 export function breadthMultiplier(chains: string[]): number {
   const extra = Math.min(Math.max(chains.length - 1, 0), MODEL.breadth_max_extra_chains);
   return 1 + extra * MODEL.breadth_step;
+}
+
+/** Clamp a number into [lo, hi]. */
+export function clamp(value: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, value));
+}
+
+/** Round to four decimal places, for the multipliers the dashboard shows. */
+export function round4(n: number): number {
+  return Math.round(n * 1e4) / 1e4;
 }
 
 /** A farm step: the action, what it costs, and how long it takes. */
@@ -240,11 +255,11 @@ export function impliedValue(
   model: ModelConstants,
 ): { implied: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; categoryMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const rawGrowth = finite(protocol.change_7d, 0);
-  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
+  const growthPct = clamp(finite(protocol.change_7d, 0), model.growth_floor, model.growth_cap);
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
+  const maturityMult =
+    model.maturity_floor + (clamp(ageForModel, 0, model.maturity_days) / model.maturity_days) * model.maturity_range;
   const breadthMult = breadthMultiplier(protocol.chains);
   const categoryMult = categoryFactor(protocol.category);
   const base = protocol.tvl_usd * model.base_multiple;
@@ -260,6 +275,11 @@ export function isPreToken(p: SnapshotProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
 }
 
+/** Whether a protocol records a token that already trades. */
+export function isLiveToken(p: SnapshotProtocol): boolean {
+  return !isPreToken(p);
+}
+
 /** Whether a protocol is one the board may rank: pre-token, not an exchange, not a versioned pool. */
 export function isRankable(p: SnapshotProtocol): boolean {
   return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name);
@@ -268,6 +288,11 @@ export function isRankable(p: SnapshotProtocol): boolean {
 /** The snapshot's protocol by slug. */
 function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
   return new Map(protocols.map((p) => [p.slug, p]));
+}
+
+/** Sort scored protocols by implied value, then slug, and number them 1..n. */
+function rankScored<T extends { implied: number; p: SnapshotProtocol }>(scored: T[]): T[] {
+  return scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
@@ -288,11 +313,12 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   for (const p of early) chosen.set(p.slug, p);
 
-  const scored = [...chosen.values()].map((p) => {
-    const v = impliedValue(p, snapshot.as_of, model);
-    return { p, ...v };
-  });
-  scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
+  const scored = rankScored(
+    [...chosen.values()].map((p) => {
+      const v = impliedValue(p, snapshot.as_of, model);
+      return { p, ...v };
+    }),
+  );
   return scored.map((s, i) => ({
     rank: i + 1,
     slug: s.p.slug,
@@ -320,8 +346,6 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     farm_steps: farmSteps(s.p, s.age).map(stepText),
   }));
 }
-
-const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
 
 /** A step as one string: its action, then its cost and time, within the gate's 20..600 characters. */
 export function stepText(step: FarmStep): string {
@@ -439,7 +463,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
 /** The live-token protocols, by market cap, for the dashboard's Live token view. */
 export function liveRows(snapshot: Snapshot): LiveRow[] {
   return snapshot.protocols
-    .filter((p) => !isPreToken(p) && p.category !== 'CEX')
+    .filter((p) => isLiveToken(p) && p.category !== 'CEX')
     .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd)
     .slice(0, LIVE_ROWS)
     .map((p) => ({
