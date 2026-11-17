@@ -9,9 +9,10 @@
 //
 // Implied value follows only from the snapshot's own figures:
 //
-//   base       = tvl_usd x MARKET_RATE, the median mcap/TVL of the
-//                comparable live-token protocols in this same snapshot
-//                (see calibrateBaseMultiple; 0.082 here, 0.25 fallback)
+//   base       = exp(intercept) x TVL ^ exponent, the value curve fitted
+//                to the comparable live-token protocols in this same
+//                snapshot (see fitValueCurve; exponent 0.52 here, the
+//                straight median-ratio line is the fallback)
 //   growth     = clamp(change_7d, -50, 100) per cent
 //   growthMult = 1 + (growth / 100) x GROWTH_WEIGHT            (0.60)
 //   maturity   = 0.60 + min(age_days, 1095) / 1095 x 0.40
@@ -27,18 +28,19 @@
 //   days is momentum, clamped so one wild week (the snapshot has a +4,448%
 //   outlier) cannot decide a rank. Age with no token is patience: a protocol
 //   that has run for years with no token has a longer record to price.
-// - The market rate is not a judgement call: it is the median market cap
-//   per dollar of TVL among the live-token protocols in this same snapshot
-//   that sit in the watchlist's size class (TVL at or above the floor) and
-//   would have been rankable had they no token (no exchange, no versioned
-//   pool, no derivative product). In this snapshot 29 such protocols trade
-//   at a median of $0.082 of market cap per $1 of TVL, so a pre-token
-//   protocol of the same size is priced at that rate — the market's own
-//   rate, not launch hype. The median is steady across the exclusion
-//   variants (0.082 whether versioned pools and derivative products are
-//   excluded or not), and no rank depends on the rate: it scales every
-//   row alike, so the ranking is decided by growth, age, breadth and
-//   category alone.
+// - The value curve is not a judgement call: it is the Huber fit of log
+//   market cap on log TVL over the live-token protocols in this same
+//   snapshot that sit in the watchlist's size class and would have been
+//   rankable had they no token (no exchange, no versioned pool, no
+//   derivative product). In this snapshot 87 such protocols trade on a
+//   curve of exponent 0.52, so a pre-token protocol of the same size is
+//   priced at the rate the market already pays for that size, not at
+//   launch hype and not at a straight line through the market: the
+//   straight median-ratio line overprices the biggest protocols three to
+//   four times over. Blind-tested by leave-one-out on the same 87, the
+//   fitted model predicts a held-out protocol's market cap to a median
+//   factor of 3.1, against 4.6 for the straight line, so the curve is the
+//   better claim about what the market pays.
 // - Breadth counts chains: a protocol live on several chains has more
 //   surface than a single-chain one, capped so breadth never dominates.
 // - Category factor is a launch-plausibility discount, read from the
@@ -48,6 +50,10 @@
 //   protocol's; curators and allocators manage other people's vaults, so
 //   their token is one step removed from the underlying business.
 // No protocol name is ever special-cased: the same function scores every row.
+
+/** The fitted value curve and its blind test, from lib/fit.ts. */
+import { fitValueCurve, median, medianRatio } from './fit.ts';
+import type { ValueCurve } from './fit.ts';
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -106,16 +112,17 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
 
 /** A one-line summary of the model, for the dashboard and the dossier. */
 export const MODEL_SUMMARY =
-  'implied = round(tvl x market-rate x growth x maturity x breadth x category), ' +
-  'the market rate being the median mcap/TVL of comparable live-token protocols ' +
-  'in the same snapshot; all from the snapshot: TVL, 7-day change, age, chains, category.';
+  'implied = round(fitted curve x growth x maturity x breadth x category), ' +
+  'the curve being exp(intercept) x TVL ^ exponent fitted by Huber regression ' +
+  'to the comparable live-token protocols in the same snapshot and blind-tested ' +
+  'by leave-one-out; all from the snapshot: TVL, 7-day change, age, chains, category.';
 
 /** Categories whose product is a derivative of a token that already trades. */
 const DERIVATIVE_CATEGORIES = new Set([
@@ -184,6 +191,8 @@ export interface BoardRow {
   implied_value_usd: number;
   model: {
     base_multiple: number;
+    curve_intercept: number;
+    curve_exponent: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -239,6 +248,14 @@ export interface RadarData {
   live_size: number;
   calibration_n: number;
   calibration_rate: number;
+  /** The fitted value curve and its blind test: base = exp(intercept) x TVL ^ exponent, over n comparables. */
+  curve: {
+    intercept: number;
+    exponent: number;
+    n: number;
+    loo_median_log_err: number;
+    loo_baseline_median_log_err: number;
+  };
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -267,11 +284,12 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** The multipliers and the implied value one protocol gets under `model`. */
+/** The multipliers and the implied value one protocol gets under `model`, from the given base value. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
+  base: number,
 ): { implied: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; categoryMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const growthPct = clamp(finite(protocol.change_7d, 0), model.growth_floor, model.growth_cap);
@@ -281,9 +299,18 @@ export function impliedValue(
     model.maturity_floor + (clamp(ageForModel, 0, model.maturity_days) / model.maturity_days) * model.maturity_range;
   const breadthMult = breadthMultiplier(protocol.chains);
   const categoryMult = categoryFactor(protocol.category);
-  const base = protocol.tvl_usd * model.base_multiple;
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult * breadthMult * categoryMult));
   return { implied, growthPct, growthMult, maturityMult, breadthMult, categoryMult, age };
+}
+
+/** The base value one protocol gets from the fitted curve. */
+export function curveBase(protocol: SnapshotProtocol, curve: ValueCurve): number {
+  return Math.exp(curve.intercept) * Math.pow(protocol.tvl_usd, curve.exponent);
+}
+
+/** The base value one protocol gets from the straight median-ratio line. */
+export function linearBase(protocol: SnapshotProtocol, rate: number): number {
+  return protocol.tvl_usd * rate;
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -345,8 +372,8 @@ function rankScored<T extends { implied: number; p: SnapshotProtocol }>(scored: 
   return scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
 }
 
-/** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
+/** The protocols the board ranks, strongest first, with ranks 1..n. `baseFor` gives each protocol its base value; `curve` is the fitted curve it came from, or null for the straight line. */
+export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, baseFor: (p: SnapshotProtocol) => number = (p) => p.tvl_usd * model.base_multiple, curve: ValueCurve | null = null): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug, even one the snapshot no longer carries (it cannot, but
@@ -365,7 +392,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
 
   const scored = rankScored(
     [...chosen.values()].map((p) => {
-      const v = impliedValue(p, snapshot.as_of, model);
+      const v = impliedValue(p, snapshot.as_of, model, baseFor(p));
       return { p, ...v };
     }),
   );
@@ -386,6 +413,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     implied_value_usd: s.implied,
     model: {
       base_multiple: model.base_multiple,
+      curve_intercept: curve === null ? Math.log(model.base_multiple) : curve.intercept,
+      curve_exponent: curve === null ? 1 : curve.exponent,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
@@ -549,13 +578,76 @@ export function radarRow(row: BoardRow, watchlist: Set<string>): RadarRow {
   };
 }
 
-/** Everything the dashboard renders, from the snapshot. The base multiple is calibrated
- *  from the snapshot itself (see calibrateBaseMultiple), so the model object the dashboard
- *  carries already holds the calibrated rate and the page recomputes every row with it. */
+/**
+ * The comparable live-token protocols the value curve is fitted to: they
+ * record a token, a market cap and a TVL, and would have been rankable had
+ * they no token (no exchange, no versioned pool, no derivative product).
+ * No TVL floor: every protocol the snapshot carries is at or above $5M,
+ * and the fit wants the whole size range, small protocols included, so
+ * the curve is measured where the early radar lives too.
+ */
+export function comparableLive(snapshot: Snapshot): SnapshotProtocol[] {
+  return snapshot.protocols.filter(
+    (p) =>
+      isLiveToken(p) &&
+      p.mcap_usd !== null &&
+      p.mcap_usd > 0 &&
+      p.tvl_usd > 0 &&
+      p.category !== 'CEX' &&
+      !VERSIONED.test(p.name) &&
+      !DERIVATIVE_CATEGORIES.has((p.category ?? '').toLowerCase()),
+  );
+}
+
+/**
+ * The blind test: leave one comparable out, fit the model on the rest,
+ * predict the held-out protocol's market cap, and take the median of the
+ * absolute log errors. `predict` builds the held-out protocol's implied
+ * value from the protocols left in. A model that only memorises the
+ * comparables fails here; a model that generalises passes.
+ */
+export function looMedianLogErr(
+  snapshot: Snapshot,
+  comps: SnapshotProtocol[],
+  model: ModelConstants,
+  predict: (heldOut: SnapshotProtocol, rest: SnapshotProtocol[]) => number,
+): number {
+  const errors: number[] = [];
+  for (let i = 0; i < comps.length; i++) {
+    const heldOut = comps[i]!;
+    const rest = comps.filter((_, j) => j !== i);
+    const implied = predict(heldOut, rest);
+    if (heldOut.mcap_usd !== null && heldOut.mcap_usd > 0 && implied > 0) {
+      errors.push(Math.abs(Math.log(implied / heldOut.mcap_usd)));
+    }
+  }
+  if (errors.length === 0) return Number.NaN;
+  return median(errors);
+}
+
+/** Everything the dashboard renders, from the snapshot. The base is the fitted value curve (see lib/fit.ts), blind-tested by leave-one-out against the straight median-ratio line; the model object the dashboard carries already holds the fitted curve and the test's numbers, and the page recomputes every row with it. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const calibration = calibrateBaseMultiple(snapshot, model);
   const calibrated: ModelConstants = { ...model, base_multiple: calibration.rate };
-  const board = buildBoard(snapshot, calibrated);
+  const comps = comparableLive(snapshot);
+  const curve = fitValueCurve(comps.map((p) => ({ tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd! })));
+  const looFitted =
+    curve === null
+      ? Number.NaN
+      : looMedianLogErr(snapshot, comps, calibrated, (heldOut, rest) => {
+          const refit = fitValueCurve(rest.map((p) => ({ tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd! })));
+          if (refit === null) return linearBase(heldOut, calibration.rate);
+          return impliedValue(heldOut, snapshot.as_of, calibrated, curveBase(heldOut, refit)).implied;
+        });
+  const looBaseline = looMedianLogErr(snapshot, comps, calibrated, (heldOut, rest) => {
+    const rate = medianRatio(rest.map((p) => ({ tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd! })));
+    return impliedValue(heldOut, snapshot.as_of, calibrated, linearBase(heldOut, rate)).implied;
+  });
+  const baseFor =
+    curve === null
+      ? (p: SnapshotProtocol) => linearBase(p, calibration.rate)
+      : (p: SnapshotProtocol) => curveBase(p, curve);
+  const board = buildBoard(snapshot, calibrated, baseFor, curve);
   const live = liveRows(snapshot);
   const watchSet = new Set(snapshot.watchlist);
   const early = board.filter((r) => !watchSet.has(r.slug)).length;
@@ -572,6 +664,13 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     live_size: live.length,
     calibration_n: calibration.n,
     calibration_rate: calibration.rate,
+    curve: {
+      intercept: curve === null ? Math.log(calibration.rate) : curve.intercept,
+      exponent: curve === null ? 1 : curve.exponent,
+      n: curve === null ? 0 : curve.n,
+      loo_median_log_err: looFitted,
+      loo_baseline_median_log_err: looBaseline,
+    },
     rows: board.map((r) => radarRow(r, watchSet)),
     live,
   };

@@ -92,5 +92,6 @@ writeFileSync(
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+    `token radar: value curve exp(${radar.curve.intercept.toFixed(3)}) x TVL ^ ${radar.curve.exponent.toFixed(3)} fitted on ${radar.curve.n} comparables; leave-one-out median |log error| ${radar.curve.loo_median_log_err.toFixed(3)} (x${Math.exp(radar.curve.loo_median_log_err).toFixed(2)}) vs straight line ${radar.curve.loo_baseline_median_log_err.toFixed(3)} (x${Math.exp(radar.curve.loo_baseline_median_log_err).toFixed(2)})\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

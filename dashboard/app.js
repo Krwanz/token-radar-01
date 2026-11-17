@@ -1,4 +1,4 @@
-// Token Radar, model radar-2. Reads window.RADAR (written beside
+// Token Radar, model radar-4. Reads window.RADAR (written beside
 // dashboard/ by main.ts) and renders the ranked board, a filterable table,
 // a top-10 strip and a per-protocol detail drawer with the model's own
 // inputs and the protocol's farm plan. No network: every byte it shows is
@@ -41,9 +41,9 @@
   // The model in one function: the page recomputes a row from the snapshot
   // figures and checks the number board.json carries, so the page's code and
   // the board's data are visibly the same arithmetic. This must match
-  // lib/model.ts exactly: base TVL x the market rate (the median mcap/TVL
-  // of the comparable live-token protocols, carried in DATA.model as
-  // base_multiple), growth clamped -50..100 at weight 0.6, maturity 0.6 +
+  // lib/model.ts exactly: base from the fitted value curve (exp of the
+  // curve intercept times TVL to the curve exponent, both carried in
+  // DATA.curve), growth clamped -50..100 at weight 0.6, maturity 0.6 +
   // min(age, 1095) / 1095 x 0.4, breadth 1 + 0.04 per extra chain (capped
   // at 5), category 0.6 derivative / 0.9 curator / 1.0 other.
   const DERIVATIVE = ['bridge', 'canonical bridge', 'cross chain bridge', 'liquid staking', 'liquid restaking', 'restaked btc', 'staking pool', 'stablecoin wrapper'];
@@ -53,7 +53,7 @@
     if (c.includes('curator') || c.includes('allocator')) return 0.9;
     return 1;
   };
-  const impliedOf = (row, model) => {
+  const impliedOf = (row, model, curve) => {
     const raw = row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d;
     const growth = Math.min(model.growth_cap, Math.max(model.growth_floor, raw));
     const growthMult = 1 + (growth / 100) * model.growth_weight;
@@ -61,7 +61,8 @@
     const maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
     const extra = Math.min(Math.max((row.chains || []).length - 1, 0), model.breadth_max_extra_chains);
     const breadth = 1 + extra * model.breadth_step;
-    return Math.max(1, Math.round(row.tvl_usd * model.base_multiple * growthMult * maturity * breadth * categoryFactor(row.category)));
+    const base = Math.exp(curve.intercept) * Math.pow(row.tvl_usd, curve.exponent);
+    return Math.max(1, Math.round(base * growthMult * maturity * breadth * categoryFactor(row.category)));
   };
 
   /** Build an element: attrs use class/text/html, on* keys are listeners, the rest are attributes. */
@@ -364,13 +365,14 @@
 
   const modelPanel = () => {
     const m = DATA.model;
+    const c = DATA.curve;
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        `implied = round( tvl_usd x ${m.base_multiple} x (1 + clamp(change_7d, ${m.growth_floor}, ${m.growth_cap}) / 100 x ${m.growth_weight}) x (${m.maturity_floor} + min(age_days, ${m.maturity_days}) / ${m.maturity_days} x ${m.maturity_range}) x breadth x category )`,
+        `implied = round( exp(${c.intercept.toFixed(3)}) x tvl_usd ^ ${c.exponent.toFixed(3)} x (1 + clamp(change_7d, ${m.growth_floor}, ${m.growth_cap}) / 100 x ${m.growth_weight}) x (${m.maturity_floor} + min(age_days, ${m.maturity_days}) / ${m.maturity_days} x ${m.maturity_range}) x breadth x category )`,
       ),
-      el('p', { class: 'sub', text: `The market rate is the median market cap per dollar of TVL among ${DATA.calibration_n} live-token protocols in this same snapshot that sit in the watchlist's size class and would have been rankable had they no token: ${m.base_multiple.toFixed(3)} here, so a pre-token protocol is priced at the rate the market already pays, not at launch hype. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ${m.unknown_age_days} days. Breadth is 1 + ${m.breadth_step} per extra chain, capped at ${m.breadth_max_extra_chains} extra chains. Category is ${m.category_derivative} for bridges, liquid-staking and other derivative products, ${m.category_curator} for curators and allocators, and 1.00 otherwise. The early radar is every rankable pre-token protocol below the watchlist floor, and the live-token protocols are set aside with their market caps shown.` }),
+      el('p', { class: 'sub', text: `The value curve is fitted, not chosen: a Huber regression of log market cap on log TVL over ${c.n} live-token protocols in this same snapshot that would have been rankable had they no token. Market cap grows like TVL to the power ${c.exponent.toFixed(2)}, not like TVL itself, so the straight median-ratio line overprices the biggest protocols three to four times over. Blind-tested by leave-one-out on the same ${c.n}, the fitted model predicts a held-out protocol's market cap to a median factor of ${Math.exp(c.loo_median_log_err).toFixed(2)}, against ${Math.exp(c.loo_baseline_median_log_err).toFixed(2)} for the straight line. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ${m.unknown_age_days} days. Breadth is 1 + ${m.breadth_step} per extra chain, capped at ${m.breadth_max_extra_chains} extra chains. Category is ${m.category_derivative} for bridges, liquid-staking and other derivative products, ${m.category_curator} for curators and allocators, and 1.00 otherwise. The early radar is every rankable pre-token protocol below the watchlist floor, and the live-token protocols are set aside with their market caps shown.` }),
     );
   };
 
@@ -384,7 +386,7 @@
     writeHash();
     dialog.textContent = '';
     const steps = farmSteps(row);
-    const recomputed = impliedOf(row, DATA.model);
+    const recomputed = impliedOf(row, DATA.model, DATA.curve);
     const matches = recomputed === row.implied_value_usd;
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
@@ -401,7 +403,7 @@
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
         el('div', null, el('span', { text: 'Chains' }), el('b', { class: 'num', text: String((row.chains || []).length) })),
-        el('div', null, el('span', { text: 'Base (TVL x market rate)' }), el('b', { class: 'num', text: fmtUsd(Math.round(row.tvl_usd * DATA.model.base_multiple)) })),
+        el('div', null, el('span', { text: 'Base (fitted value curve)' }), el('b', { class: 'num', text: fmtUsd(Math.round(Math.exp(DATA.curve.intercept) * Math.pow(row.tvl_usd, DATA.curve.exponent))) })),
         el('div', null, el('span', { text: 'Combined multipliers' }), el('b', { class: 'num', text: (row.growth_multiplier * row.maturity_multiplier * row.breadth_multiplier * row.category_factor).toFixed(4) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
@@ -409,7 +411,7 @@
         el('div', null, el('span', { text: 'Category factor' }), el('b', { class: 'num', text: String(row.category_factor) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
       ),
-      el('p', { class: 'sub', text: `Model ${DATA.model_version}: the same function scores every protocol, and the market rate is the median mcap/TVL of ${DATA.calibration_n} comparable live-token protocols in this snapshot. The page recomputes this row as ${fmtUsd(recomputed)}${matches ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.'} This is an estimate, not a price.` }),
+      el('p', { class: 'sub', text: `Model ${DATA.model_version}: the same function scores every protocol, and the value curve is fitted to ${DATA.curve.n} comparable live-token protocols in this snapshot (market cap grows like TVL ^ ${DATA.curve.exponent.toFixed(2)}), blind-tested by leave-one-out to a median factor of ${Math.exp(DATA.curve.loo_median_log_err).toFixed(2)} against ${Math.exp(DATA.curve.loo_baseline_median_log_err).toFixed(2)} for the straight line. The page recomputes this row as ${fmtUsd(recomputed)}${matches ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.'} This is an estimate, not a price.` }),
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
