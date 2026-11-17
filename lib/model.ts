@@ -9,7 +9,9 @@
 //
 // Implied value follows only from the snapshot's own figures:
 //
-//   base       = tvl_usd x BASE_MULTIPLE                         (0.25)
+//   base       = tvl_usd x MARKET_RATE, the median mcap/TVL of the
+//                comparable live-token protocols in this same snapshot
+//                (see calibrateBaseMultiple; 0.082 here, 0.25 fallback)
 //   growth     = clamp(change_7d, -50, 100) per cent
 //   growthMult = 1 + (growth / 100) x GROWTH_WEIGHT            (0.60)
 //   maturity   = 0.60 + min(age_days, 1095) / 1095 x 0.40
@@ -25,6 +27,18 @@
 //   days is momentum, clamped so one wild week (the snapshot has a +4,448%
 //   outlier) cannot decide a rank. Age with no token is patience: a protocol
 //   that has run for years with no token has a longer record to price.
+// - The market rate is not a judgement call: it is the median market cap
+//   per dollar of TVL among the live-token protocols in this same snapshot
+//   that sit in the watchlist's size class (TVL at or above the floor) and
+//   would have been rankable had they no token (no exchange, no versioned
+//   pool, no derivative product). In this snapshot 29 such protocols trade
+//   at a median of $0.082 of market cap per $1 of TVL, so a pre-token
+//   protocol of the same size is priced at that rate — the market's own
+//   rate, not launch hype. The median is steady across the exclusion
+//   variants (0.082 whether versioned pools and derivative products are
+//   excluded or not), and no rank depends on the rate: it scales every
+//   row alike, so the ranking is decided by growth, age, breadth and
+//   category alone.
 // - Breadth counts chains: a protocol live on several chains has more
 //   surface than a single-chain one, capped so breadth never dominates.
 // - Category factor is a launch-plausibility discount, read from the
@@ -58,7 +72,9 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-/** The model's constants, as the dashboard states them and the sandbox may change them. */
+/** The model's constants, as the dashboard states them and the sandbox may change them.
+ *  base_multiple is the fallback rate: buildRadar replaces it with the calibrated
+ *  market rate from the snapshot itself (see calibrateBaseMultiple). */
 export interface ModelConstants {
   base_multiple: number;
   growth_weight: number;
@@ -90,15 +106,16 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
 
 /** A one-line summary of the model, for the dashboard and the dossier. */
 export const MODEL_SUMMARY =
-  'implied = round(tvl x 0.25 x growth x maturity x breadth x category), ' +
-  'all from the snapshot: TVL, 7-day change, age, chains, category.';
+  'implied = round(tvl x market-rate x growth x maturity x breadth x category), ' +
+  'the market rate being the median mcap/TVL of comparable live-token protocols ' +
+  'in the same snapshot; all from the snapshot: TVL, 7-day change, age, chains, category.';
 
 /** Categories whose product is a derivative of a token that already trades. */
 const DERIVATIVE_CATEGORIES = new Set([
@@ -220,6 +237,8 @@ export interface RadarData {
   board_size: number;
   early_size: number;
   live_size: number;
+  calibration_n: number;
+  calibration_rate: number;
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -283,6 +302,37 @@ export function isLiveToken(p: SnapshotProtocol): boolean {
 /** Whether a protocol is one the board may rank: pre-token, not an exchange, not a versioned pool. */
 export function isRankable(p: SnapshotProtocol): boolean {
   return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name);
+}
+
+/**
+ * The market rate: the median market cap per dollar of TVL among the live-token
+ * protocols in this same snapshot that sit in the watchlist's size class (TVL at
+ * or above the floor) and would have been rankable had they no token (no exchange,
+ * no versioned pool, no derivative product). The median is robust to the snapshot's
+ * wild ratios (one live protocol trades at 400x its TVL), and it is steady across
+ * the exclusion variants, so the choice of exclusions does not decide the rate.
+ * With no such protocol in the snapshot, the rate falls back to the model's
+ * base_multiple. Returns the rate and the size of the population it came from.
+ */
+export function calibrateBaseMultiple(snapshot: Snapshot, model: ModelConstants = MODEL): { rate: number; n: number } {
+  const ratios = snapshot.protocols
+    .filter(
+      (p) =>
+        isLiveToken(p) &&
+        p.mcap_usd !== null &&
+        p.mcap_usd > 0 &&
+        p.tvl_usd > 0 &&
+        p.tvl_usd >= snapshot.floor_usd &&
+        p.category !== 'CEX' &&
+        !VERSIONED.test(p.name) &&
+        !DERIVATIVE_CATEGORIES.has((p.category ?? '').toLowerCase()),
+    )
+    .map((p) => p.mcap_usd! / p.tvl_usd)
+    .sort((a, b) => a - b);
+  if (ratios.length === 0) return { rate: model.base_multiple, n: 0 };
+  const mid = Math.floor(ratios.length / 2);
+  const median = ratios.length % 2 === 1 ? ratios[mid]! : (ratios[mid - 1]! + ratios[mid]!) / 2;
+  return { rate: median, n: ratios.length };
 }
 
 /** The snapshot's protocol by slug. */
@@ -499,9 +549,13 @@ export function radarRow(row: BoardRow, watchlist: Set<string>): RadarRow {
   };
 }
 
-/** Everything the dashboard renders, from the snapshot. */
+/** Everything the dashboard renders, from the snapshot. The base multiple is calibrated
+ *  from the snapshot itself (see calibrateBaseMultiple), so the model object the dashboard
+ *  carries already holds the calibrated rate and the page recomputes every row with it. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, model);
+  const calibration = calibrateBaseMultiple(snapshot, model);
+  const calibrated: ModelConstants = { ...model, base_multiple: calibration.rate };
+  const board = buildBoard(snapshot, calibrated);
   const live = liveRows(snapshot);
   const watchSet = new Set(snapshot.watchlist);
   const early = board.filter((r) => !watchSet.has(r.slug)).length;
@@ -509,13 +563,15 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     as_of: snapshot.as_of,
     source: snapshot.source,
     floor_usd: snapshot.floor_usd,
-    model,
+    model: calibrated,
     model_version: MODEL_VERSION,
     watchlist_size: snapshot.watchlist.length,
     watchlist: [...snapshot.watchlist],
     board_size: board.length,
     early_size: early,
     live_size: live.length,
+    calibration_n: calibration.n,
+    calibration_rate: calibration.rate,
     rows: board.map((r) => radarRow(r, watchSet)),
     live,
   };

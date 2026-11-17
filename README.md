@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/token-radar-01/Krwanz/token-radar-01/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/Krwanz/token-radar-01/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-Token Radar — model radar-2: a ranked board of pre-token protocols by implied launch value, with a farm plan for each.
+Token Radar — model radar-3: a ranked board of pre-token protocols by implied launch value, with a farm plan for each.
 
 Entry for make.fun `token-radar-01`: build the best token launch radar.
 $1,325 total, 1st place $1,000. Deadline 2026-12-14T10:00:00Z.
@@ -20,16 +20,24 @@ $1,325 total, 1st place $1,000. Deadline 2026-12-14T10:00:00Z.
 - `screenshots/` — board, detail, filtered views
 - `dossier.json` — built with the vendored `vendor/makefun-board.ts`
 
-## Model (radar-2)
+## Model (radar-3)
 
 ```
-implied = round( TVL x 0.25
+implied = round( TVL x market-rate
   x (1 + clamp(change_7d, -50, 100) / 100 x 0.60)
   x (0.60 + min(age_days, 1095) / 1095 x 0.40)
   x (1 + 0.04 per extra chain, capped at 5)
   x category_factor )
 ```
 
+- The market rate is the median market cap per dollar of TVL among the
+  comparable live-token protocols in this same snapshot: TVL at or above
+  the $50M floor, no exchange, no versioned pool, no derivative product.
+  In this snapshot 29 such protocols trade at a median of $0.082 of market
+  cap per $1 of TVL, so a pre-token protocol of the same size is priced at
+  the rate the market already pays, not at launch hype. The rate scales
+  every row alike, so no rank depends on it; the ranking is decided by
+  growth, age, breadth and category alone.
 - `category_factor` is 0.60 for bridges, liquid-staking and other derivative
   products (a token of a token that already trades), 0.90 for curators and
   allocators, 1.00 otherwise. It is read from the snapshot's `category`
